@@ -44,45 +44,6 @@ async function getRoutePoints(origin, destination) {
   return polyline.decode(poly).map(([lat, lng]) => ({ lat, lng }));
 }
 
-let clients = [];
-
-// 1️⃣ Frontend connects here (SSE)
-app.get("/sse", (req, res) => {
-  res.setHeader("Content-Type", "text/event-stream");
-  res.setHeader("Cache-Control", "no-cache");
-  res.setHeader("Connection", "keep-alive");
-
-  // Push new client
-  clients.push(res);
-  console.log("👂 Client connected:", clients.length);
-
-  // 🔄 Send a heartbeat every 20 minutes
-  const heartbeat = setInterval(() => {
-    res.write(`:heartbeat\n\n`); // comment line, ignored by browser
-  }, 20 * 60 * 1000); // 20 minutes
-
-  // Clean up when client disconnects
-  req.on("close", () => {
-    clearInterval(heartbeat);
-    clients = clients.filter(c => c !== res);
-    console.log("❌ Client disconnected:", clients.length);
-  });
-});
-
-// 2️⃣ ADK sends message here
-app.post("/adksend", (req, res) => {
-  const data = req.body; // e.g. { carId, expectedTime }
-  console.log("📨 Message from ADK:", data);
-
-  // Broadcast message to all connected SSE clients
-  clients.forEach(c => {
-    c.write(`data: ${JSON.stringify(data)}\n\n`);
-  });
-
-  res.json({ ok: true });
-});
-
-
 app.get("/getcarroute", async (req, res) => {
   const carId = req.query.carId;
   if (!carId) return res.status(400).json({ error: "carId required" });
