@@ -3,7 +3,6 @@ import dotenv from "dotenv";
 import allowAllCors from "./corsConfig.js";
 import polyline from "@mapbox/polyline";
 import fetch from "node-fetch";
-import serviceAccount from "./serviceAccountKey.json" with { type: "json" };
 import fs from "fs"; 
 import path from "path";
 import dbPromise, { initDb } from "./db.js";
@@ -14,17 +13,18 @@ dotenv.config();
 await initDb(); 
 
 const app = express();
-const PORT = 3001;
+const PORT = process.env.PORT || 3000;
+
 app.use(allowAllCors);
 app.use(express.json());
 app.use("/video", videoRoutes);
 
-// --- Initialize Firebase Admin (Firestore) ---
-admin.initializeApp({
-  credential: admin.credential.cert(serviceAccount),
-});
+let  credential = admin.credential.applicationDefault();
+
+admin.initializeApp({ credential });
 
 const firestore = admin.firestore();
+
 
 // --- Helper functions for routes ---
 const DIRECTION_API = process.env.DIRECTION_API;
@@ -91,7 +91,6 @@ function getDocumentName(carId, forceNew) {
   const timestamp = new Date().toISOString().replace(/[:.]/g, "");
   const docName = `${carId}_${timestamp}`;
   currentDocuments[carId] = docName;
-  console.log(`Created new trip document for ${carId}: ${docName}`);
   return docName;
 }
 
@@ -112,7 +111,6 @@ async function logPositionToFirestore(carId, lat, lng, newTrip) {
       lng,
       timestamp,
     });
-    console.log(`Logged first point for ${carId} at ${docName}: (${lat}, ${lng})`);
   } else {
     // Subsequent points → subcollection "positions"
     const subDocId = timestamp.replace(/[:.]/g, "");
@@ -123,7 +121,6 @@ async function logPositionToFirestore(carId, lat, lng, newTrip) {
       lng,
       timestamp,
     });
-    console.log(`Logged subsequent point for ${carId} at ${docName}/positions/${subDocId}: (${lat}, ${lng})`);
   }
 
   return docName;
@@ -239,7 +236,6 @@ app.post("/startTrip", async (req, res) => {
       await colRef.doc(`leg_${i + 1}`).set(etaTimeline[i]);
     }
 
-    console.log(`✅ ETA timeline (${etaTimeline.length} legs, 5h span) saved to ${collectionName}`);
     res.json({ success: true, totalLegs: etaTimeline.length, collection: collectionName });
   } catch (err) {
     console.error("🔥 /startTrip failed:", err);
@@ -296,7 +292,6 @@ app.post("/addplaces", async (req, res) => {
     }
     await stmt.finalize();
 
-    console.log(`📍 Added ${places.length} places to ${carId}`);
     res.json({ success: true, carId, places });
   } catch (err) {
     console.error("🔥 /addplaces error:", err);
@@ -336,7 +331,6 @@ async function deleteDocRecursivelyBatch(docRef) {
   // Commit if batch reaches 400 ops (safe margin under 500)
   if (batchOps >= 400) {
     await batch.commit();
-    console.log(`🔥 Committed batch of ${batchOps} deletions`);
     batch = firestore.batch();
     batchOps = 0;
   }
@@ -352,10 +346,8 @@ for (const docRef of allDocs) {
 // Commit any remaining deletes in the batch
 if (batchOps > 0) {
   await batch.commit();
-  console.log(`🔥 Committed final batch of ${batchOps} deletions`);
 }
 
-console.log(`🔥 Total deleted docs (parents + batches) from cars_latest_position for ${carId}: ${deletedCount}`);
 
 // 2️⃣ Delete any sub-collections
 const allCollections = await firestore.listCollections();
@@ -374,10 +366,8 @@ for (const col of allCollections) {
 
 if (subDeleted > 0) {
   await batch.commit();
-  console.log(`🔥 Deleted ${subDeleted} docs from sub-collections for ${carId}`);
 }
 
-console.log(`Firestore cleanup complete for ${carId}`);
 
     // --- SQLite cleanup ---
     const db = await dbPromise;
@@ -388,15 +378,25 @@ console.log(`Firestore cleanup complete for ${carId}`);
       const filePath = path.join(process.cwd(), "videos", videoRow.filename);
       try {
         await fs.promises.unlink(filePath);
-        console.log(`🗑️ Deleted video file for ${carId}: ${videoRow.filename}`);
       } catch (fileErr) {
         console.warn(`⚠️ Could not delete video file ${filePath}:`, fileErr.message);
       }
     }
 
+      await db.run("BEGIN TRANSACTION");
     await db.run(`DELETE FROM videos WHERE car_id = ?`, [carId]);
-    const result = await db.run(`DELETE FROM places WHERE car_id = ?`, [carId]);
-    console.log(` ^=^z Car ${carId} removed — ${result.changes} place rows deleted.`);
+    await db.run(`DELETE FROM places WHERE car_id = ?`, [carId]);
+    await db.run("COMMIT");
+  
+    const checkVideo = await db.get(`SELECT * FROM videos WHERE car_id = ?`, [carId]);
+  const checkPlaces = await db.get(`SELECT * FROM places WHERE car_id = ?`, [carId]);
+
+  if (!checkVideo && !checkPlaces) {
+    console.log(`✅ Car ${carId} successfully removed from SQLite`);
+  } else {
+    console.warn(`⚠️ Car ${carId} deletion may have failed:`, { checkVideo, checkPlaces });
+  }
+   
 
     // --- Success response ---
     res.json({ success: true, removed: carId });
