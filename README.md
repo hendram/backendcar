@@ -3,23 +3,16 @@
 This repository provides the backend API for the Mobile Ads Platform, where simulated cars drive around mapped routes while displaying videos as in-car advertisements. The backend manages cars, places, trips, and videos, using Express.js, Firebase Firestore, and Google Cloud Storage (GCS).
 
 ## 🧩 Tech Stack
-Component	Technology
-Backend Framework	Express.js (Node.js)
-Database	Firebase Firestore
-Storage	Google Cloud Storage
-External API	Google Directions API
-Authentication	Service Account (Application Default Credential)
-Video Handling	GCS streaming with HTTP Range requests
-Routing	Polyline decoding via @mapbox/polyline
+| Component         | Technology                                        |
+| ----------------- | ------------------------------------------------- |
+| Backend Framework | Express.js (Node.js)                              |
+| Database          | Firebase Firestore                                |
+| Storage           | Google Cloud Storage                              |
+| External API      | Google Directions API                             |
+| Authentication    | Service Account (Application Default Credential) |
+| Video Handling    | GCS streaming with HTTP Range requests           |
+| Routing           | Polyline decoding via @mapbox/polyline           |
 
-## ⚙️ Environment Variables
-
-Create a .env file at the project root:
-
-PORT=3000
-DIRECTION_API=<your_google_directions_api_key>
-GCS_BUCKET_NAME=<your_google_cloud_storage_bucket>
-GOOGLE_APPLICATION_CREDENTIALS=/path/to/service-account.json
 
 # 🧠 Core Concepts
 
@@ -32,7 +25,7 @@ places → list of location names (for routes)
 video → metadata for uploaded video files
 
 Example Firestore structure:
-
+```bash
 car1/
   ├── places
   └── video
@@ -40,6 +33,7 @@ cars_latest_position/
   ├── car1_<timestamp>
   │    ├── positions/
   │    └── (lat, lng, timestamp)
+```
 
 ## 🚀 API Endpoints
 ###  GET /listcars
