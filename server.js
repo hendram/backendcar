@@ -26,11 +26,7 @@ admin.initializeApp({ credential });
 const firestore = admin.firestore();
 
 
-// --- Helper functions for routes ---
 const DIRECTION_API = process.env.DIRECTION_API;
-// --- Gemini & DistanceMatrix ETA simulation ---
-const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
-const DISTANCE_MATRIX_API = process.env.DISTANCE_MATRIX_API;
 
 async function getRoutePoints(origin, destination) {
   const url = `https://maps.googleapis.com/maps/api/directions/json?origin=${encodeURIComponent(
@@ -59,18 +55,15 @@ app.get("/getcarroute", async (req, res) => {
     if (places.length === 0)
       return res.status(404).json({ error: "No places found for this car" });
 
-    // Build route segments in parallel
     const segmentPromises = [];
     for (let i = 0; i < places.length; i++) {
       const start = places[i];
-      const end = places[(i + 1) % places.length]; // loop back to start
+      const end = places[(i + 1) % places.length]; 
       segmentPromises.push(getRoutePoints(start, end));
     }
 
-    // Wait for all segments
     const segments = await Promise.all(segmentPromises);
 
-    // Flatten array of arrays into a single array of points
     const allPoints = segments.flat();
 
     res.json(allPoints);
@@ -80,10 +73,9 @@ app.get("/getcarroute", async (req, res) => {
   }
 });
 
-const currentDocuments = {}; // in-memory only: tracks last trip document per car
+const currentDocuments = {}; 
 
 function getDocumentName(carId, forceNew) {
-  // reuse last document unless forced
   if (currentDocuments[carId] && !forceNew) {
     return currentDocuments[carId];
   }
@@ -99,12 +91,10 @@ async function logPositionToFirestore(carId, lat, lng, newTrip) {
   const timestamp = new Date().toISOString();
   const collectionRef = firestore.collection("cars_latest_position");
 
-  // Check if this is the first point (new trip)
   const docRef = collectionRef.doc(docName);
   const docSnapshot = await docRef.get();
 
   if (!docSnapshot.exists) {
-    // First point of trip → top-level document
     await docRef.set({
       carId,
       lat,
@@ -112,7 +102,6 @@ async function logPositionToFirestore(carId, lat, lng, newTrip) {
       timestamp,
     });
   } else {
-    // Subsequent points → subcollection "positions"
     const subDocId = timestamp.replace(/[:.]/g, "");
     const subDocRef = docRef.collection("positions").doc(subDocId);
     await subDocRef.set({
@@ -126,7 +115,6 @@ async function logPositionToFirestore(carId, lat, lng, newTrip) {
   return docName;
 }
 
-// Unified endpoint
 app.post("/carcurpos", async (req, res) => {
   try {
     const { carId, lat, lng, newTrip } = req.body;
@@ -144,7 +132,6 @@ app.post("/carcurpos", async (req, res) => {
 });
 
 
-// helper: get route info from Directions API
 async function getDirectionsForPlaces(places) {
   const results = [];
 
@@ -168,7 +155,6 @@ async function getDirectionsForPlaces(places) {
     }
   }
 
-  // also add the last leg looping back to start
   const lastOrigin = encodeURIComponent(places[places.length - 1]);
   const firstDest = encodeURIComponent(places[0]);
   const loopUrl = `https://maps.googleapis.com/maps/api/directions/json?origin=${lastOrigin}&destination=${firstDest}&key=${DIRECTION_API}`;
@@ -187,14 +173,12 @@ async function getDirectionsForPlaces(places) {
   return results;
 }
 
-// --- New route to start ETA simulation ---
 app.post("/startTrip", async (req, res) => {
   try {
     const { carId, startTime } = req.body;
     if (!carId || !startTime)
       return res.status(400).json({ error: "Missing carId or startTime" });
 
-    // --- fetch places from SQLite
     const db = await dbPromise;
     const rows = await db.all(`SELECT name FROM places WHERE car_id = ?`, [carId]);
     const places = rows.map((r) => r.name);
@@ -202,17 +186,15 @@ app.post("/startTrip", async (req, res) => {
     if (!places.length)
       return res.status(400).json({ error: `No places found for ${carId}` });
 
-    // --- fetch all leg durations/distances once
     const legs = await getDirectionsForPlaces(places);
 
     const start = new Date(startTime);
-    const maxEnd = new Date(start.getTime() + 5 * 60 * 60 * 1000); // +5 hours
+    const maxEnd = new Date(start.getTime() + 5 * 60 * 60 * 1000);
     let current = new Date(start);
     let totalDuration = 0;
     const etaTimeline = [];
     let legCounter = 0;
 
-    // --- loop A→B→C→A→B... until +5h reached
     while (current < maxEnd) {
       for (const leg of legs) {
         current = new Date(current.getTime() + leg.duration * 1000);
@@ -228,7 +210,6 @@ app.post("/startTrip", async (req, res) => {
       }
     }
 
-    // --- save all to Firestore in ONE collection
     const collectionName = `${carId}_coll_${startTime.replace(/[:T\-Z]/g, "")}`;
     const colRef = firestore.collection(collectionName);
 
@@ -247,7 +228,6 @@ app.get("/listcars", async (req, res) => {
   try {
     const db = await dbPromise;
 
-    // Get all car IDs (union of those in places and videos)
     const carRows = await db.all(`
       SELECT DISTINCT car_id FROM (
         SELECT car_id FROM places
@@ -256,7 +236,6 @@ app.get("/listcars", async (req, res) => {
       )
     `);
 
-    // For each car, fetch its places and video info
     const result = [];
     for (const { car_id } of carRows) {
       const placeRows = await db.all(`SELECT name FROM places WHERE car_id = ?`, [car_id]);
@@ -285,7 +264,6 @@ app.post("/addplaces", async (req, res) => {
 
     const db = await dbPromise;
 
-    // Insert new places
     const stmt = await db.prepare(`INSERT INTO places (car_id, name) VALUES (?, ?)`);
     for (const place of places) {
       await stmt.run(carId, typeof place === "string" ? place : JSON.stringify(place));
@@ -304,7 +282,6 @@ app.post("/removecar", async (req, res) => {
     const { carId } = req.body;
     if (!carId) return res.status(400).json({ error: "carId required" });
 
-// --- Firestore cleanup with batches ---
 const carsColl = firestore.collection("cars_latest_position");
 const allDocs = await carsColl.listDocuments();
 
@@ -312,9 +289,7 @@ let deletedCount = 0;
 let batch = firestore.batch();
 let batchOps = 0;
 
-// Helper to delete doc and its subcollections recursively using batches
 async function deleteDocRecursivelyBatch(docRef) {
-  // Delete subcollections first
   const subCollections = await docRef.listCollections();
   for (const subCol of subCollections) {
     const subDocs = await subCol.listDocuments();
@@ -323,12 +298,10 @@ async function deleteDocRecursivelyBatch(docRef) {
     }
   }
 
-  // Add document delete to batch
   batch.delete(docRef);
   deletedCount++;
   batchOps++;
 
-  // Commit if batch reaches 400 ops (safe margin under 500)
   if (batchOps >= 400) {
     await batch.commit();
     batch = firestore.batch();
@@ -336,23 +309,20 @@ async function deleteDocRecursivelyBatch(docRef) {
   }
 }
 
-// Loop through main collection docs
 for (const docRef of allDocs) {
   if (docRef.id.startsWith(`${carId}_`)) {
     await deleteDocRecursivelyBatch(docRef);
   }
 }
 
-// Commit any remaining deletes in the batch
 if (batchOps > 0) {
   await batch.commit();
 }
 
 
-// 2️⃣ Delete any sub-collections
 const allCollections = await firestore.listCollections();
 let subDeleted = 0;
-batch = firestore.batch(); // <== new batch!
+batch = firestore.batch(); 
 
 for (const col of allCollections) {
   if (col.id.startsWith(`${carId}_`)) {
@@ -369,10 +339,8 @@ if (subDeleted > 0) {
 }
 
 
-    // --- SQLite cleanup ---
     const db = await dbPromise;
 
-    // Delete video file if exists
     const videoRow = await db.get(`SELECT filename FROM videos WHERE car_id = ?`, [carId]);
     if (videoRow && videoRow.filename) {
       const filePath = path.join(process.cwd(), "videos", videoRow.filename);
@@ -398,7 +366,6 @@ if (subDeleted > 0) {
   }
    
 
-    // --- Success response ---
     res.json({ success: true, removed: carId });
 
   } catch (err) {
@@ -412,18 +379,15 @@ app.get("/stream/:filename", (req, res) => {
   const { filename } = req.params;
   const filePath = path.join(process.cwd(), "videos", filename);
 
-  // Check if file exists
   if (!fs.existsSync(filePath)) {
     return res.status(404).json({ error: "Video not found" });
   }
 
-  // Get video size
   const stat = fs.statSync(filePath);
   const fileSize = stat.size;
   const range = req.headers.range;
 
   if (range) {
-    // --- Handle range requests for streaming ---
     const parts = range.replace(/bytes=/, "").split("-");
     const start = parseInt(parts[0], 10);
     const end = parts[1] ? parseInt(parts[1], 10) : fileSize - 1;
@@ -445,7 +409,6 @@ app.get("/stream/:filename", (req, res) => {
     res.writeHead(206, head);
     file.pipe(res);
   } else {
-    // --- Serve entire video if no range specified ---
     const head = {
       "Content-Length": fileSize,
       "Content-Type": "video/mp4",

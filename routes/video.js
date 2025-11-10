@@ -2,15 +2,13 @@ import express from "express";
 import fs from "fs";
 import path from "path";
 import multer from "multer";
-import db from "../db.js"; // default export from db.js
+import db from "../db.js"; 
 
 const router = express.Router();
 
-// Ensure /videos folder exists
 const videoDir = path.join(process.cwd(), "videos");
 if (!fs.existsSync(videoDir)) fs.mkdirSync(videoDir);
 
-// Configure multer for video uploads
 const storage = multer.diskStorage({
   destination: (req, file, cb) => cb(null, videoDir),
   filename: (req, file, cb) => {
@@ -34,7 +32,6 @@ router.post("/upload", upload.single("video"), async (req, res) => {
 
     const dbConn = await db;
 
-    // Ensure table exists (in case initDb wasn’t called early)
     await dbConn.exec(`
       CREATE TABLE IF NOT EXISTS videos (
         car_id TEXT PRIMARY KEY,
@@ -42,12 +39,17 @@ router.post("/upload", upload.single("video"), async (req, res) => {
       )
     `);
 
-    // Upsert video record (insert or replace)
-    await dbConn.run(
-      `INSERT OR REPLACE INTO videos (car_id, filename)
-       VALUES (?, ?)`,
-      [carId, savedFilename]
-    );
+  const result = await dbConn.run(
+    `INSERT OR REPLACE INTO videos (car_id, filename)
+     VALUES (?, ?)`,
+    [carId, savedFilename]
+  );
+
+  if (result.changes > 0) {
+    console.log(`✅ Video saved successfully for car_id=${carId}, filename=${savedFilename}`);
+  } else {
+    console.log(`⚠️ No changes made for car_id=${carId}, filename=${savedFilename}`);
+  }
 
     res.json({ success: true, filename: savedFilename });
   } catch (err) {
