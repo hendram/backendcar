@@ -5,28 +5,28 @@ import polyline from "@mapbox/polyline";
 import fetch from "node-fetch";
 import fs from "fs"; 
 import path from "path";
-import dbPromise, { initDb } from "./db.js";
-import videoRoutes from "./routes/video.js";
 import admin from "firebase-admin";
 
 dotenv.config();
-await initDb(); 
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
 app.use(allowAllCors);
 app.use(express.json());
-app.use("/video", videoRoutes);
 
-let  credential = admin.credential.applicationDefault();
-
+let credential = admin.credential.applicationDefault();
 admin.initializeApp({ credential });
 
 const firestore = admin.firestore();
-
-
 const DIRECTION_API = process.env.DIRECTION_API;
+import videoRoutes from "./routes/video.js";
+app.use("/video", videoRoutes);
+
+function getBucket() {
+  return admin.storage().bucket(process.env.GCS_BUCKET_NAME);
+}
+ 
 
 async function getRoutePoints(origin, destination) {
   const url = `https://maps.googleapis.com/maps/api/directions/json?origin=${encodeURIComponent(
@@ -45,13 +45,12 @@ app.get("/getcarroute", async (req, res) => {
   if (!carId) return res.status(400).json({ error: "carId required" });
 
   try {
-    const db = await dbPromise;
-    const rows = await db.all(
-      `SELECT name FROM places WHERE car_id = ? ORDER BY id ASC`,
-      [carId]
-    );
-    const places = rows.map(r => r.name);
+    const placesDoc = await firestore.collection(carId).doc("places").get();
+    if (!placesDoc.exists) {
+      return res.status(404).json({ error: "No places found for this car" });
+    }
 
+    const places = placesDoc.data().names || [];
     if (places.length === 0)
       return res.status(404).json({ error: "No places found for this car" });
 
@@ -63,7 +62,6 @@ app.get("/getcarroute", async (req, res) => {
     }
 
     const segments = await Promise.all(segmentPromises);
-
     const allPoints = segments.flat();
 
     res.json(allPoints);
@@ -179,10 +177,12 @@ app.post("/startTrip", async (req, res) => {
     if (!carId || !startTime)
       return res.status(400).json({ error: "Missing carId or startTime" });
 
-    const db = await dbPromise;
-    const rows = await db.all(`SELECT name FROM places WHERE car_id = ?`, [carId]);
-    const places = rows.map((r) => r.name);
+    const placesDoc = await firestore.collection(carId).doc("places").get();
+    if (!placesDoc.exists) {
+      return res.status(400).json({ error: `No places found for ${carId}` });
+    }
 
+    const places = placesDoc.data().names || [];
     if (!places.length)
       return res.status(400).json({ error: `No places found for ${carId}` });
 
@@ -226,34 +226,40 @@ app.post("/startTrip", async (req, res) => {
 
 app.get("/listcars", async (req, res) => {
   try {
-    const db = await dbPromise;
-
-    const carRows = await db.all(`
-      SELECT DISTINCT car_id FROM (
-        SELECT car_id FROM places
-        UNION
-        SELECT car_id FROM videos
-      )
-    `);
+    const collections = await firestore.listCollections();
 
     const result = [];
-    for (const { car_id } of carRows) {
-      const placeRows = await db.all(`SELECT name FROM places WHERE car_id = ?`, [car_id]);
-      const videoRow = await db.get(`SELECT filename FROM videos WHERE car_id = ?`, [car_id]);
+
+    const carIdPattern = /^car\d+$/;
+
+    for (const col of collections) {
+      const colName = col.id;
+
+      if (!carIdPattern.test(colName)) {
+        continue;
+      }
+
+      const placesDoc = await col.doc("places").get();
+      const videoDoc = await col.doc("video").get();
+
+      const places = placesDoc.exists ? placesDoc.data().names || [] : [];
+      const video = videoDoc.exists ? videoDoc.data().filename : null;
+
 
       result.push({
-        id: car_id,
-        places: placeRows.map(p => p.name),
-        video: videoRow ? videoRow.filename : null
+        id: colName,
+        places,
+        video,
       });
     }
 
     res.json(result);
   } catch (err) {
-    console.error("DB read error:", err);
-    res.status(500).json({ error: "DB read failed" });
+    console.error("🔥 [listcars] Firestore read error:", err);
+    res.status(500).json({ error: "Firestore read failed" });
   }
 });
+
 
 app.post("/addplaces", async (req, res) => {
   try {
@@ -262,13 +268,7 @@ app.post("/addplaces", async (req, res) => {
       return res.status(400).json({ error: "carId and non-empty places[] required" });
     }
 
-    const db = await dbPromise;
-
-    const stmt = await db.prepare(`INSERT INTO places (car_id, name) VALUES (?, ?)`);
-    for (const place of places) {
-      await stmt.run(carId, typeof place === "string" ? place : JSON.stringify(place));
-    }
-    await stmt.finalize();
+    await firestore.collection(carId).doc("places").set({ names: places });
 
     res.json({ success: true, carId, places });
   } catch (err) {
@@ -282,139 +282,111 @@ app.post("/removecar", async (req, res) => {
     const { carId } = req.body;
     if (!carId) return res.status(400).json({ error: "carId required" });
 
-const carsColl = firestore.collection("cars_latest_position");
-const allDocs = await carsColl.listDocuments();
 
-let deletedCount = 0;
-let batch = firestore.batch();
-let batchOps = 0;
+    const videoDocRef = firestore.collection(carId).doc("video");
+   const videoDoc = await videoDocRef.get();
 
-async function deleteDocRecursivelyBatch(docRef) {
-  const subCollections = await docRef.listCollections();
-  for (const subCol of subCollections) {
-    const subDocs = await subCol.listDocuments();
-    for (const subDoc of subDocs) {
-      await deleteDocRecursivelyBatch(subDoc);
+    if (videoDoc.exists) {
+      const { filename } = videoDoc.data() || {};
+      if (filename) {
+        const bucket = getBucket();
+        const file = bucket.file(filename);
+                 
+        try {
+          await file.delete();
+        } catch (gcsErr) {
+          if (gcsErr.code === 404 || /Not Found/i.test(String(gcsErr.message))) {
+            console.warn(`⚠️ File not found in GCS (or already deleted): ${filename}`);
+          } else {
+            console.warn(`⚠️ Error deleting file from GCS: ${filename}`, gcsErr);
+          }
+        }
+      } else {
+        console.log("ℹ️ video doc exists but has no filename field");
+      }
+    } else {
+      console.log("ℹ️ No video doc found for this car");
     }
-  }
-
-  batch.delete(docRef);
-  deletedCount++;
-  batchOps++;
-
-  if (batchOps >= 400) {
-    await batch.commit();
-    batch = firestore.batch();
-    batchOps = 0;
-  }
-}
-
-for (const docRef of allDocs) {
-  if (docRef.id.startsWith(`${carId}_`)) {
-    await deleteDocRecursivelyBatch(docRef);
-  }
-}
-
-if (batchOps > 0) {
-  await batch.commit();
-}
 
 
-const allCollections = await firestore.listCollections();
-let subDeleted = 0;
-batch = firestore.batch(); 
+    const collectionRef = firestore.collection(carId);
+    const docs = await collectionRef.listDocuments();
 
-for (const col of allCollections) {
-  if (col.id.startsWith(`${carId}_`)) {
-    const docs = await col.listDocuments();
-    for (const doc of docs) {
-      batch.delete(doc);
-      subDeleted++;
-    }
-  }
-}
+    if (docs.length === 0) {
+      console.log("ℹ️ No documents to delete in collection");
+    } else {
+      let batch = firestore.batch();
+      let count = 0;
+      const BATCH_SIZE = 500; 
+      for (const docRef of docs) {
+        batch.delete(docRef);
+        count++;
 
-if (subDeleted > 0) {
-  await batch.commit();
-}
+        if (count >= BATCH_SIZE) {
+          await batch.commit();
+          batch = firestore.batch();
+          count = 0;
+        }
+      }
 
-
-    const db = await dbPromise;
-
-    const videoRow = await db.get(`SELECT filename FROM videos WHERE car_id = ?`, [carId]);
-    if (videoRow && videoRow.filename) {
-      const filePath = path.join(process.cwd(), "videos", videoRow.filename);
-      try {
-        await fs.promises.unlink(filePath);
-      } catch (fileErr) {
-        console.warn(`⚠️ Could not delete video file ${filePath}:`, fileErr.message);
+      if (count > 0) {
+        await batch.commit();
       }
     }
 
-      await db.run("BEGIN TRANSACTION");
-    await db.run(`DELETE FROM videos WHERE car_id = ?`, [carId]);
-    await db.run(`DELETE FROM places WHERE car_id = ?`, [carId]);
-    await db.run("COMMIT");
-  
-    const checkVideo = await db.get(`SELECT * FROM videos WHERE car_id = ?`, [carId]);
-  const checkPlaces = await db.get(`SELECT * FROM places WHERE car_id = ?`, [carId]);
-
-  if (!checkVideo && !checkPlaces) {
-    console.log(`✅ Car ${carId} successfully removed from SQLite`);
-  } else {
-    console.warn(`⚠️ Car ${carId} deletion may have failed:`, { checkVideo, checkPlaces });
-  }
-   
-
-    res.json({ success: true, removed: carId });
-
+    console.log(`🏁 Finished removing car collection and GCS file (if any): ${carId}`);
+    return res.json({ success: true, removed: carId });
   } catch (err) {
-    console.error(" ^=^t /removecar error:", err);
-    res.status(500).json({ error: "Failed to remove car" });
+    console.error("🔥 /removecar error:", err);
+    return res.status(500).json({ error: "Failed to remove car" });
   }
 });
 
+app.get("/stream/:filename", async (req, res) => {
+  try {
+    const { filename } = req.params;
+    const bucket = getBucket();
+    const file = bucket.file(filename);
 
-app.get("/stream/:filename", (req, res) => {
-  const { filename } = req.params;
-  const filePath = path.join(process.cwd(), "videos", filename);
+    const [exists] = await file.exists();
+    if (!exists) return res.status(404).json({ error: "Video not found" });
 
-  if (!fs.existsSync(filePath)) {
-    return res.status(404).json({ error: "Video not found" });
-  }
+    const [metadata] = await file.getMetadata();
+    const fileSize = parseInt(metadata.size, 10);
+    const range = req.headers.range;
 
-  const stat = fs.statSync(filePath);
-  const fileSize = stat.size;
-  const range = req.headers.range;
+    if (range) {
+      const parts = range.replace(/bytes=/, "").split("-");
+      const start = parseInt(parts[0], 10);
+      const end = parts[1] ? parseInt(parts[1], 10) : fileSize - 1;
 
-  if (range) {
-    const parts = range.replace(/bytes=/, "").split("-");
-    const start = parseInt(parts[0], 10);
-    const end = parts[1] ? parseInt(parts[1], 10) : fileSize - 1;
+      if (start >= fileSize || end >= fileSize) {
+        res.status(416).send("Requested range not satisfiable");
+        return;
+      }
 
-    if (start >= fileSize || end >= fileSize) {
-      res.status(416).send("Requested range not satisfiable");
-      return;
+      const chunkSize = end - start + 1;
+      const stream = file.createReadStream({ start, end });
+      const head = {
+        "Content-Range": `bytes ${start}-${end}/${fileSize}`,
+        "Accept-Ranges": "bytes",
+        "Content-Length": chunkSize,
+        "Content-Type": metadata.contentType,
+      };
+      res.writeHead(206, head);
+      stream.pipe(res);
+    } else {
+      const stream = file.createReadStream();
+      const head = {
+        "Content-Length": fileSize,
+        "Content-Type": metadata.contentType,
+      };
+      res.writeHead(200, head);
+      stream.pipe(res);
     }
-
-    const chunkSize = end - start + 1;
-    const file = fs.createReadStream(filePath, { start, end });
-    const head = {
-      "Content-Range": `bytes ${start}-${end}/${fileSize}`,
-      "Accept-Ranges": "bytes",
-      "Content-Length": chunkSize,
-      "Content-Type": "video/mp4",
-    };
-
-    res.writeHead(206, head);
-    file.pipe(res);
-  } else {
-    const head = {
-      "Content-Length": fileSize,
-      "Content-Type": "video/mp4",
-    };
-    res.writeHead(200, head);
-    fs.createReadStream(filePath).pipe(res);
+  } catch (err) {
+    console.error("🔥 /stream/:filename error:", err);
+    res.status(500).json({ error: "Stream failed" });
   }
 });
 

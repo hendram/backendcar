@@ -1,24 +1,14 @@
 import express from "express";
-import fs from "fs";
-import path from "path";
 import multer from "multer";
-import db from "../db.js"; 
+import admin from "firebase-admin";
 
 const router = express.Router();
+const upload = multer({ storage: multer.memoryStorage() });
 
-const videoDir = path.join(process.cwd(), "videos");
-if (!fs.existsSync(videoDir)) fs.mkdirSync(videoDir);
-
-const storage = multer.diskStorage({
-  destination: (req, file, cb) => cb(null, videoDir),
-  filename: (req, file, cb) => {
-    const carId = req.body.carId || "unknown";
-    const sanitized = file.originalname.replace(/[^a-zA-Z0-9_.-]/g, "_");
-    const filename = `${carId}_${sanitized}`;
-    cb(null, filename);
-  },
-});
-const upload = multer({ storage });
+// Helper to get bucket after Firebase init
+function getBucket() {
+  return admin.storage().bucket(process.env.GCS_BUCKET_NAME);
+}
 
 // === POST /video/upload ===
 router.post("/upload", upload.single("video"), async (req, res) => {
@@ -27,35 +17,30 @@ router.post("/upload", upload.single("video"), async (req, res) => {
     if (!req.file || !carId)
       return res.status(400).json({ error: "Missing carId or video file" });
 
-    const savedFilename = req.file.filename;
-    console.log(`🎥 Uploaded video for ${carId}: ${savedFilename}`);
+    const sanitized = req.file.originalname.replace(/[^a-zA-Z0-9_.-]/g, "_");
+    const gcsFilename = `${carId}_${sanitized}`;
 
-    const dbConn = await db;
+    const bucket = getBucket(); // ✅ lazy initialization
+    const file = bucket.file(gcsFilename);
+    await file.save(req.file.buffer, {
+      metadata: { contentType: req.file.mimetype },
+      resumable: false,
+    });
 
-    await dbConn.exec(`
-      CREATE TABLE IF NOT EXISTS videos (
-        car_id TEXT PRIMARY KEY,
-        filename TEXT
-      )
-    `);
+    console.log(`🎥 Uploaded video for ${carId} to GCS: ${gcsFilename}`);
 
-  const result = await dbConn.run(
-    `INSERT OR REPLACE INTO videos (car_id, filename)
-     VALUES (?, ?)`,
-    [carId, savedFilename]
-  );
+    const firestore = admin.firestore();
+    await firestore.collection(carId).doc("video").set({
+      filename: gcsFilename,
+      uploadedAt: admin.firestore.FieldValue.serverTimestamp(),
+    });
 
-  if (result.changes > 0) {
-    console.log(`✅ Video saved successfully for car_id=${carId}, filename=${savedFilename}`);
-  } else {
-    console.log(`⚠️ No changes made for car_id=${carId}, filename=${savedFilename}`);
-  }
-
-    res.json({ success: true, filename: savedFilename });
+    res.json({ success: true, filename: gcsFilename });
   } catch (err) {
     console.error("🔥 /video/upload error:", err);
     res.status(500).json({ error: "Upload failed" });
   }
 });
+
 
 export default router;
