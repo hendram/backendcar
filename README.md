@@ -168,3 +168,7 @@ Binary video stream (Content-Type: video/mp4).
 | `logPositionToFirestore()` | Logs **car positions with timestamps**, maintaining a subcollection of route points. |
 | `getDirectionsForPlaces()` | Computes **multi-leg travel data** (distance and duration) between listed locations. |
 | `getBucket()` | Returns a reference to the configured **Google Cloud Storage bucket** for video or data handling. |
+
+
+![Workflow Diagram](MobileAdsPlatformdiagram.png)
+
