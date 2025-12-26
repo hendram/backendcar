@@ -12,6 +12,7 @@ firebase-debug.*.log*
 
 # Google Cloud SDK
 google-cloud-sdk/
+service-account.json
 
 # Firebase config
 
