@@ -29,6 +29,7 @@ admin.initializeApp({
 
 const bucket = admin.storage().bucket();
 
+const firestore = admin.firestore();
 
 async function startServer() {
   // Initialize TiDB tables first
@@ -82,6 +83,160 @@ app.get("/getcarroute", async (req, res) => {
     res.status(500).json({ error: "Failed to build route" });
   }
 });
+
+
+const currentDocuments = {}; // for Firestore document tracking
+
+function getDocumentName(carId, forceNew) {
+  if (currentDocuments[carId] && !forceNew) {
+    return currentDocuments[carId];
+  }
+  const timestamp = new Date().toISOString().replace(/[:.]/g, "");
+  const docName = `${carId}_${timestamp}`;
+  currentDocuments[carId] = docName;
+  return docName;
+}
+
+// --- Firestore logging ---
+async function logPositionToFirestore(carId, lat, lng, newTrip) {
+  const docName = getDocumentName(carId, newTrip);
+  const timestamp = new Date().toISOString();
+  const collectionRef = firestore.collection("cars_latest_position");
+
+  const docRef = collectionRef.doc(docName);
+  const docSnapshot = await docRef.get();
+
+  if (!docSnapshot.exists) {
+    await docRef.set({ carId, lat, lng, timestamp });
+  } else {
+    const subDocId = timestamp.replace(/[:.]/g, "");
+    await docRef.collection("positions").doc(subDocId).set({ carId, lat, lng, timestamp });
+  }
+
+  return docName;
+}
+
+async function upsertLatestPosition(carId, tripDoc, lat, lng) {
+  await query(
+    `INSERT INTO car_latest_positions (car_id, trip_doc, lat, lng)
+     VALUES (?, ?, ?, ?)
+     ON DUPLICATE KEY UPDATE
+       trip_doc = VALUES(trip_doc),
+       lat = VALUES(lat),
+       lng = VALUES(lng),
+       timestamp = CURRENT_TIMESTAMP`,
+    [carId, tripDoc, lat, lng]
+  );
+}
+
+
+// --- TiDB trip legs creation using Directions API ---
+async function createTripLegs(carId, places, startTime) {
+  const legs = [];
+
+  // Generate leg info for each pair of places
+  for (let i = 0; i < places.length; i++) {
+    const origin = places[i];
+    const destination = places[(i + 1) % places.length]; // loop around
+    const url = `https://maps.googleapis.com/maps/api/directions/json?origin=${encodeURIComponent(
+      origin
+    )}&destination=${encodeURIComponent(destination)}&key=${DIRECTION_API}`;
+
+    const res = await fetch(url);
+    const data = await res.json();
+
+    const leg = data.routes?.[0]?.legs?.[0];
+    if (!leg) {
+      console.warn(`No leg found for ${origin} → ${destination}`);
+      continue;
+    }
+
+    legs.push({
+      origin,
+      destination,
+      distance_m: leg.distance.value,
+      duration_s: leg.duration.value,
+    });
+  }
+
+  // Compute ETA timestamps
+  let currentTime = new Date(startTime);
+  const tripCollection = `${carId}_${currentTime.toISOString().replace(/[:.]/g, "")}`;
+
+  for (let i = 0; i < legs.length; i++) {
+    currentTime = new Date(currentTime.getTime() + legs[i].duration_s * 1000);
+
+    await query(
+      `INSERT INTO car_trip_legs (car_id, trip_collection, leg_index, origin, destination, distance_m, duration_s, eta)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        carId,
+        tripCollection,
+        i + 1,
+        legs[i].origin,
+        legs[i].destination,
+        legs[i].distance_m,
+        legs[i].duration_s,
+        currentTime.toISOString(),
+      ]
+    );
+  }
+
+  return tripCollection;
+}
+
+app.post("/carcurpos", async (req, res) => {
+  try {
+    const { carId, lat, lng, newTrip } = req.body;
+    if (!carId || typeof lat !== "number" || typeof lng !== "number") {
+      return res.status(400).json({ error: "Missing carId, lat, or lng" });
+    }
+
+    const tripDoc = getDocumentName(carId, newTrip);
+
+if (newTrip) {
+  const placesRows = await query(
+    `SELECT place_name FROM car_places WHERE car_id = ? ORDER BY place_order ASC`,
+    [carId]
+  );
+  const places = placesRows.map((p) => p.place_name);
+  if (places.length > 1) {
+    const tripCollection = await createTripLegs(carId, places, new Date().toISOString());
+  }
+}
+
+    // --- 2️⃣ Upsert latest position in TiDB ---
+    await query(
+      `INSERT INTO car_latest_positions (car_id, trip_doc, lat, lng)
+       VALUES (?, ?, ?, ?)
+       ON DUPLICATE KEY UPDATE
+         trip_doc = VALUES(trip_doc),
+         lat = VALUES(lat),
+         lng = VALUES(lng),
+         timestamp = CURRENT_TIMESTAMP`,
+      [carId, tripDoc, lat, lng]
+    );
+
+    // --- 3️⃣ Log current position to Firestore for mobile realtime display ---
+    const collectionRef = firestore.collection("cars_latest_position");
+    const docRef = collectionRef.doc(tripDoc);
+    const timestamp = new Date().toISOString();
+    const docSnapshot = await docRef.get();
+
+    if (!docSnapshot.exists) {
+      await docRef.set({ carId, lat, lng, timestamp });
+    } else {
+      const subDocId = timestamp.replace(/[:.]/g, "");
+      await docRef.collection("positions").doc(subDocId).set({ carId, lat, lng, timestamp });
+    }
+
+    res.json({ success: true, carId, tripDoc });
+  } catch (err) {
+    console.error("🔥 /carcurpos error:", err);
+    res.status(500).json({ error: "Failed to process car position" });
+  }
+});
+
 
 // --------------------- Add/Update car places ---------------------
 app.post("/addplaces", async (req, res) => {
