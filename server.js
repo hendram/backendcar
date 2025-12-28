@@ -7,8 +7,6 @@ import { query, initTables } from "./tidbConnector.js"; // our TiDB connector
 import fs from "fs"; 
 import path from "path";
 import admin from "firebase-admin";
-import serviceAccount from "./service-account.json" assert { type: "json" };
-
 
 dotenv.config();
 
@@ -23,7 +21,7 @@ import videoRoutes from "./routes/video.js";
 app.use("/video", videoRoutes);
 
 admin.initializeApp({
-  credential: admin.credential.cert(serviceAccount),
+  credential: admin.credential.cert(process.env.GOOGLE_APPLICATION_CREDENTIALS),
   storageBucket: "my-mobileadscar", // your bucket name
 });
 
