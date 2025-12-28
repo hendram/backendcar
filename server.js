@@ -267,6 +267,7 @@ app.post("/addplaces", async (req, res) => {
 // --------------------- List cars ---------------------
 app.get("/listcars", async (req, res) => {
   try {
+    await flushLatestPositions();
     // Get all distinct car IDs
     const cars = await query(`SELECT DISTINCT car_id FROM cars`);
     const result = [];
@@ -379,41 +380,18 @@ app.post("/registercar", async (req, res) => {
   }
 });
 
+async function flushLatestPositions() {
+  const collectionRef = firestore.collection("cars_latest_position");
+  const docs = await collectionRef.listDocuments();
 
-app.get("/syncLatestPositions", async (req, res) => {
-  try {
-    // 1️⃣ Fetch all latest positions from TiDB
-    const latestPositions = await query(
-      `SELECT car_id, trip_doc, lat, lng, timestamp FROM car_latest_positions`
-    );
+  if (docs.length === 0) return;
 
-    // 2️⃣ Flush Firestore collection
-    const collectionRef = firestore.collection("cars_latest_position");
-    const docs = await collectionRef.listDocuments();
-    const batch = firestore.batch();
-    docs.forEach((doc) => batch.delete(doc));
-    await batch.commit();
+  const batch = firestore.batch();
+  docs.forEach((doc) => batch.delete(doc));
+  await batch.commit();
 
-    // 3️⃣ Push all latest positions into Firestore
-    const batchInsert = firestore.batch();
-    latestPositions.forEach((row) => {
-      const docRef = collectionRef.doc(`${row.car_id}_${row.trip_doc}`);
-      batchInsert.set(docRef, {
-        carId: row.car_id,
-        tripDoc: row.trip_doc,
-        lat: row.lat,
-        lng: row.lng,
-        timestamp: row.timestamp,
-      });
-    });
-    await batchInsert.commit();
-
-    res.json({ success: true, count: latestPositions.length });
-  } catch (err) {
-    console.error("🔥 /syncLatestPositions error:", err);
-    res.status(500).json({ error: "Failed to sync latest positions" });
-  }
-});
+  console.log(`Flushed ${docs.length} latest positions`);
+}
 
 app.get("/video/url/:filename", async (req, res) => {
   try {
