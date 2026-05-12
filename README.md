@@ -166,3 +166,14 @@ Binary video stream (Content-Type: video/mp4).
 
 ![Workflow Diagram](MobileAdsPlatformdiagram.png)
 
+### Dockerfile
+
+FROM ghcr.io/hendram/backendcar:latest
+
+WORKDIR /home/backendcar
+
+ENV PORT=3000
+
+EXPOSE 3000
+
+CMD ["node", "server.js"]
